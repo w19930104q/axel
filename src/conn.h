@@ -100,6 +100,7 @@ typedef struct {
 	tcp_t *tcp;
 	bool enabled;
 	bool supported;
+	bool range_invalid;	/* server would not honour our Range */
 	double last_transfer;
 	char *message;
 	char *local_if;

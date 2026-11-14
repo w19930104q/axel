@@ -56,6 +56,7 @@ typedef struct {
 	char proxy_auth[MAX_STRING];
 	off_t firstbyte;
 	off_t lastbyte;
+	char if_range[MAX_STRING];	/* entity tag or HTTP-date, "" for none */
 	int status;
 	tcp_t tcp;
 	char *local_if;
@@ -74,6 +75,9 @@ const char *http_header(const http_t *conn, const char *header);
 void http_filename(const http_t *conn, char *filename, size_t size);
 off_t http_size(http_t *conn);
 off_t http_size_from_range(http_t *conn);
+int http_content_range(http_t *conn, off_t *start, off_t *end, off_t *total);
+time_t http_parse_date(const char *s);
+void http_format_date(char *dst, size_t len, time_t t);
 void http_decode(char *s);
 
 #endif				/* AXEL_HTTP_H */

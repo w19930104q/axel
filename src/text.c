@@ -388,6 +388,7 @@ int
 set_filename(axel_t *axel, char fn[MAX_STRING])
 {
 	char statefn[MAX_STRING + 3];
+	char partfn[MAX_STRING + 6];
 
 	if (!*fn) {
 		/* Local file existence check */
@@ -396,13 +397,20 @@ set_filename(axel_t *axel, char fn[MAX_STRING])
 		for (int i = 0; 1; i++) {
 			snprintf(statefn, sizeof(statefn), "%s.st",
 				 axel->filename);
+			snprintf(partfn, sizeof(partfn), "%s.part",
+				 axel->filename);
 
 			int f_exists = !access(axel->filename, F_OK);
 			int st_exists = !access(statefn, F_OK);
-			if (f_exists) {
-				if (axel->conn[0].supported && st_exists)
-					break;
-			} else if (!st_exists)
+			int part_exists = !access(partfn, F_OK);
+			/* An earlier run left progress under this name.  The
+			   data of a download in flight is the .part file;
+			   the final name itself only holds partial data of
+			   downloads older than that scheme. */
+			if (st_exists && (part_exists || f_exists) &&
+			    axel->conn[0].supported)
+				break;
+			if (!f_exists && !st_exists && !part_exists)
 				break;
 			snprintf(s, axel->filename + sizeof(axel->filename) - s,
 				 ".%i", i);
@@ -427,11 +435,13 @@ set_filename(axel_t *axel, char fn[MAX_STRING])
 	}
 
 	snprintf(statefn, sizeof(statefn), "%s.st", fn);
+	snprintf(partfn, sizeof(partfn), "%s.part", fn);
 	if (access(fn, F_OK) == 0 && access(statefn, F_OK) != 0) {
 		fprintf(stderr, _("No state file, cannot resume!\n"));
 		return -1;
 	}
-	if (access(statefn, F_OK) == 0 && access(fn, F_OK) != 0) {
+	if (access(statefn, F_OK) == 0 && access(partfn, F_OK) != 0 &&
+	    access(fn, F_OK) != 0) {
 		printf(_("State file found, but no downloaded data. Starting from scratch.\n"));
 		unlink(statefn);
 	}
@@ -583,7 +593,7 @@ main(int argc, char *argv[])
 	printf(_("\nDownloaded %s in %s. (%.2f KB/s)\n"), hsize, htime,
 	       (double)axel->bytes_per_second / 1024);
 
-	ret = axel->ready ? 0 : 2;
+	ret = axel->ready == 1 ? 0 : 2;
 
  close_axel:
 	axel_close(axel);

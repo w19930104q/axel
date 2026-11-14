@@ -1,6 +1,6 @@
 # One binary per suite: harness.h keeps its registry in file-scope statics,
 # so two suites linked together would leave one of them unreachable.
-TEST_SUITES = test/netrc test/conf test/http_params
+TEST_SUITES = test/netrc test/conf test/http_params test/range_http
 
 # Some properties of the tree are invisible to a program compiled from it:
 # how long its files are, and whether they are compiled at all.  These suites
@@ -11,12 +11,13 @@ TEST_SUITES = test/netrc test/conf test/http_params
 # about the language.
 SH_SUITES = \
 	test/file-length.sh \
-	test/file-map.sh
+	test/file-map.sh \
+	test/range-http.sh
 
 # tap-run drives the suites itself, so automake's own driver stays out of it
 check_PROGRAMS = $(TEST_SUITES) test/tap-run
 
-EXTRA_DIST += $(SH_SUITES) test/tap-prettify
+EXTRA_DIST += $(SH_SUITES) test/tap-prettify test/range_server.py
 CLEANFILES = test/tap.log
 
 test_netrc_SOURCES = \
@@ -45,6 +46,37 @@ test_http_params_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
 test_http_params_CFLAGS = $(AM_CFLAGS) $(PTHREAD_CFLAGS)
 test_http_params_LDADD = $(LIBOBJS) $(PTHREAD_LIBS)
 
+# The resume logic lives in src/axel.c, src/conn.c and src/stfile.c, so this
+# suite links most of the downloader; src/text.c stays out, the suite stubs
+# the two symbols axel.c takes from it.
+test_range_http_SOURCES = \
+	test/harness.h \
+	test/range_http.c \
+	src/abuf.c \
+	src/axel.c \
+	src/axel.h \
+	src/conf.c \
+	src/conn.c \
+	src/ftp.c \
+	src/hash.c \
+	src/http.c \
+	src/http_params.c \
+	src/netrc.c \
+	src/random.c \
+	src/restart.c \
+	src/sleep.c \
+	src/stfile.c \
+	src/tcp.c
+if WITH_SSL
+test_range_http_SOURCES += \
+	src/dn-match.c \
+	src/ssl.c \
+	src/ssl_verify.c
+endif
+test_range_http_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
+test_range_http_CFLAGS = $(AM_CFLAGS) $(PTHREAD_CFLAGS)
+test_range_http_LDADD = $(LIBOBJS) $(SSL_LIBS) $(LIBINTL) $(PTHREAD_LIBS)
+
 test_tap_run_SOURCES = test/tap-run.c
 
 # Straight down a pipe, so tap-prettify draws the run as it happens rather
@@ -63,5 +95,6 @@ check-local: $(check_PROGRAMS)
 		scripts="$$scripts $(abs_top_srcdir)/$$s"; \
 	done; \
 	SRCTOP='$(abs_top_srcdir)' \
+	    AXEL_BIN='$(abs_top_builddir)/axel$(EXEEXT)' \
 	    test/tap-run $(TEST_SUITES) $$scripts | tee test/tap.log \
 		| $(AWK) -f $(top_srcdir)/test/tap-prettify

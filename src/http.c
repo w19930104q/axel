@@ -201,6 +201,10 @@ http_get(http_t *conn, char *lurl)
 		http_addheader(conn, "Range: bytes=%jd-",
 			       (intmax_t)conn->firstbyte);
 	}
+	/* A resumed download asks the server to answer 206 only while the
+	   file is still the one the partial data came from. */
+	if (conn->firstbyte >= 0 && *conn->if_range)
+		http_addheader(conn, "If-Range: %s", conn->if_range);
 }
 
 void
@@ -358,6 +362,95 @@ http_size_from_range(http_t *conn)
 		return -3;
 
 	return j;
+}
+
+/* Parse a "Content-Range: bytes START-END/TOTAL" header into its three
+ * numbers.  Returns 0 when all three were there, -1 otherwise; a 416 reply
+ * (range-set is a star) and an unknown total (a star) both fail. */
+int
+http_content_range(http_t *conn, off_t *start, off_t *end, off_t *total)
+{
+	const char *i = http_header(conn, "Content-Range:");
+	if (!i)
+		return -1;
+
+	char unit[16];
+	intmax_t s, e, t;
+	if (sscanf(i, " %15s %jd-%jd/%jd", unit, &s, &e, &t) != 4)
+		return -1;
+	if (strcasecmp(unit, "bytes") != 0)
+		return -1;
+
+	*start = s;
+	*end = e;
+	*total = t;
+	return 0;
+}
+
+/* Days from 1970-01-01 to y-m-d, proleptic Gregorian; Howard Hinnant's
+ * days_from_civil, here so the date parser owes nothing to the locale or
+ * the C library's timegm. */
+static
+int64_t
+days_from_civil(int y, unsigned m, unsigned d)
+{
+	y -= m <= 2;
+	const int era = (y >= 0 ? y : y - 399) / 400;
+	const unsigned yoe = y - era * 400;
+	const unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+	const unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+	return era * 146097 + (int)doe - 719468;
+}
+
+/* Parse an IMF-fixdate ("Sun, 06 Nov 1994 08:49:37 GMT"), the only format
+ * an HTTP Last-Modified may use.  Returns the time, or 0 if the string is
+ * not one -- 0 can never be a Last-Modified worth resuming from. */
+time_t
+http_parse_date(const char *s)
+{
+	static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+	char mon[4] = {0};
+	int day, year, hour, min, sec;
+
+	s = strchr(s, ',');
+	if (!s)
+		return 0;
+	if (sscanf(s + 1, " %d %3s %d %d:%d:%d",
+		   &day, mon, &year, &hour, &min, &sec) != 6)
+		return 0;
+
+	const char *p = strstr(months, mon);
+	if (!p)
+		return 0;
+	const unsigned month = (p - months) / 3 + 1;
+
+	if (day < 1 || day > 31 || hour > 23 || min > 59 || sec > 60)
+		return 0;
+
+	const int64_t t = days_from_civil(year, month, day) * 86400
+	    + hour * 3600 + min * 60 + sec;
+	return t > 0 ? t : 0;
+}
+
+/* The inverse of http_parse_date: render t as an IMF-fixdate, for sending
+ * back as an If-Range value. */
+void
+http_format_date(char *dst, size_t len, time_t t)
+{
+	static const char wday[][4] =
+	    {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+	static const char mon[][4] =
+	    {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+	     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+	struct tm tm;
+
+	if (!gmtime_r(&t, &tm)) {
+		*dst = 0;
+		return;
+	}
+	snprintf(dst, len, "%s, %02d %s %04d %02d:%02d:%02d GMT",
+		 wday[tm.tm_wday], tm.tm_mday, mon[tm.tm_mon],
+		 tm.tm_year + 1900, tm.tm_hour, tm.tm_min, tm.tm_sec);
 }
 
 /**

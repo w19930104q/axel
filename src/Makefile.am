@@ -24,6 +24,7 @@ axel_SOURCES = \
 	src/netrc.c \
 	src/netrc.h \
 	src/random.c \
+	src/restart.c \
 	src/search.c \
 	src/search.h \
 	src/ssl.h \

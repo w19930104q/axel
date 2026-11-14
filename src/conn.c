@@ -329,6 +329,36 @@ conn_setup(conn_t *conn)
 	return 1;
 }
 
+/* A range was requested, so the answer has to be exactly that range of
+ * exactly the representation asked for.  A 200 means the server is sending
+ * the whole file -- either it ignores Range, or If-Range told it the file
+ * changed -- and a 206 whose Content-Range disagrees with the request is
+ * just as unusable: writing that body at the range offset would splice two
+ * different files together.  Mark the range as refused so the caller can
+ * restart the download from scratch instead. */
+static
+bool
+conn_range_response_ok(conn_t *conn)
+{
+	if (conn->http->status == 200) {
+		conn->range_invalid = true;
+		return false;
+	}
+	if (conn->http->status != 206)
+		return true;	/* the caller's status check reports it */
+
+	off_t start, end, total;
+	if (http_content_range(conn->http, &start, &end, &total) < 0 ||
+	    start != conn->http->firstbyte || end < start ||
+	    (conn->http->lastbyte && end != conn->http->lastbyte - 1) ||
+	    (conn->size > 0 && conn->size != LLONG_MAX &&
+	     total != conn->size)) {
+		conn->range_invalid = true;
+		return false;
+	}
+	return true;
+}
+
 int
 conn_exec(conn_t *conn)
 {
@@ -339,6 +369,9 @@ conn_exec(conn_t *conn)
 	} else {
 		abuf_setup(conn->http->headers, 1024);
 		if (!http_exec(conn->http))
+			return 0;
+		if (conn->http->firstbyte >= 0 &&
+		    !conn_range_response_ok(conn))
 			return 0;
 		return conn->http->status / 100 == 2;
 	}
@@ -479,7 +512,10 @@ conn_info(conn_t *conn)
 		const char *t;
 
 		conn->supported = true;
+		/* The probe asks about the whole file, not about the range
+		   the connection was working on */
 		conn->currentbyte = 0;
+		conn->lastbyte = 0;
 		pthread_mutex_lock(&conn->lock);
 		int setup_ret = conn_setup(conn);
 		pthread_mutex_unlock(&conn->lock);

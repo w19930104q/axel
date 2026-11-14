@@ -175,6 +175,7 @@ axel_new(conf_t *conf, int count, const search_t *res)
 
 	conn_url(axel->url->text, sizeof(axel->url->text) - 1, axel->conn);
 	axel->size = axel->conn[0].size;
+	axel_save_validators(axel);
 	if (axel->conf->verbose > 0) {
 		if (axel->size != LLONG_MAX) {
 			char hsize[32];
@@ -234,6 +235,16 @@ axel_open(axel_t *axel)
 	if (axel->conf->verbose > 0)
 		axel_message(axel, _("Opening output file %s"), axel->filename);
 
+	/* The partial data is written next to the final name and only
+	   renamed over it once the whole representation is there, so an
+	   interrupted or short download never leaves a truncated file
+	   behind under the real name. */
+	if (snprintf(axel->partname, sizeof(axel->partname), "%s.part",
+		     axel->filename) >= (int)sizeof(axel->partname)) {
+		axel_message(axel, _("Filename too long"));
+		return 0;
+	}
+
 	axel->outfd = -1;
 
 	/* Check whether server knows about RESTart and switch back to
@@ -251,10 +262,20 @@ axel_open(axel_t *axel)
 		if (loaded < 0)
 			return 0;
 
-		if (loaded > 0 &&
-		    (axel->outfd = open(axel->filename, O_WRONLY, 0666)) == -1) {
-			axel_message(axel, _("Error opening local file"));
-			return 0;
+		if (loaded > 0) {
+			axel->outfd = open(axel->partname, O_WRONLY, 0666);
+			if (axel->outfd == -1) {
+				if (errno != ENOENT) {
+					axel_message(axel,
+						     _("Error opening local file"));
+					return 0;
+				}
+				/* State without the data it describes */
+				axel_message(axel, _("Partial data missing, "
+						     "starting from scratch."));
+				axel->bytes_done = 0;
+				stfile_unlink(axel->filename);
+			}
 		}
 	}
 
@@ -263,7 +284,8 @@ axel_open(axel_t *axel)
 		axel_divide(axel);
 
 		if ((axel->outfd =
-		     open(axel->filename, O_CREAT | O_WRONLY, 0666)) == -1) {
+		     open(axel->partname,
+			  O_CREAT | O_WRONLY | O_TRUNC, 0666)) == -1) {
 			axel_message(axel, _("Error opening local file"));
 			return 0;
 		}
@@ -368,6 +390,10 @@ axel_start(axel_t *axel)
 			axel->conn[i].supported = true;
 	}
 
+	/* Ranges are asked for conditionally, and every 206 is checked
+	   against them */
+	axel_set_conn_validators(axel);
+
 	if (axel->conf->verbose > 0)
 		axel_message(axel, _("Starting download"));
 
@@ -458,9 +484,15 @@ read_connection(axel_t *axel, int i, fd_set *fds)
 					     i);
 			}
 		}
-		if (!axel->conn[0].supported) {
+		if (!axel->conn[0].supported &&
+		    (axel->size == LLONG_MAX ||
+		     axel->bytes_done >= axel->size)) {
+			/* An unknown size can only ever end like this */
 			axel->ready = 1;
 		}
+		/* A short read with a known size is not the end: the
+		   connection is restarted, and a server that cannot resume
+		   forces the whole download to start over. */
 		conn_disconnect(&axel->conn[i]);
 		reactivate_connection(axel, i);
 		return 0;
@@ -499,7 +531,6 @@ read_connection(axel_t *axel, int i, fd_set *fds)
  * -- axel->conn is calloc'd, and the entries a state file grows it by are
  * memset -- so zeroing it on the way out is what tells a thread still to be
  * reaped from one that is already gone. */
-static
 void
 join_setup_thread(conn_t *conn)
 {
@@ -516,6 +547,30 @@ void
 restart_connections(axel_t *axel)
 {
 	url_t *url_ptr = axel->url;
+
+	for (int i = 0; i < axel->conf->num_connections; i++) {
+		/* skip connection if setup thread hasn't released the lock yet */
+		if (pthread_mutex_trylock(&axel->conn[i].lock))
+			continue;
+
+		/* A range the server would not honour poisons every offset */
+		bool restart = axel->conn[i].range_invalid;
+
+		/* A connection of a server that cannot resume and that lost
+		   its place cannot continue where it was either */
+		if (!restart && !axel->conn[0].supported &&
+		    !axel->conn[i].enabled &&
+		    axel->conn[i].currentbyte > 0 &&
+		    axel->conn[i].currentbyte < axel->conn[i].lastbyte)
+			restart = true;
+
+		pthread_mutex_unlock(&axel->conn[i].lock);
+
+		if (restart) {
+			axel_restart_scratch(axel);
+			return;
+		}
+	}
 
 	for (int i = 0; i < axel->conf->num_connections; i++) {
 		/* skip connection if setup thread hasn't released the lock yet */
@@ -726,7 +781,18 @@ axel_close(axel_t *axel)
 
 	/* Delete state file if necessary */
 	if (axel->ready == 1) {
-		stfile_unlink(axel->filename);
+		/* The whole representation is assembled; only now may it
+		   replace whatever the final name held before.  If the
+		   rename fails the state file stays, so a later run can
+		   pick the download up instead of losing it. */
+		if (*axel->partname == 0 ||
+		    rename(axel->partname, axel->filename) == 0) {
+			stfile_unlink(axel->filename);
+		} else {
+			axel_message(axel, _("Error renaming %s to %s: %s"),
+				     axel->partname, axel->filename,
+				     strerror(errno));
+		}
 	}
 	/* Else: Create it.. */
 	else if (axel->bytes_done > 0) {

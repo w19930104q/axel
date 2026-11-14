@@ -137,6 +137,13 @@ typedef struct {
 	conn_t *conn;
 	conf_t *conf;
 	char filename[MAX_STRING];
+	/* Partial data lives here and is renamed over filename only once the
+	   whole representation has been assembled */
+	char partname[MAX_STRING + 6];
+	/* What the server said about the representation, so a later run can
+	   tell whether it is still the same file */
+	char etag[MAX_STRING];		/* strong entity tag, "" if none */
+	time_t last_modified;		/* Last-Modified, 0 if none */
 	double start_time;
 	int next_state, finish_time;
 	off_t bytes_done, start_byte, size;
@@ -144,6 +151,7 @@ typedef struct {
 	struct timespec delay_time;
 	int outfd;
 	int ready;
+	int restarts;			/* from-scratch restarts so far */
 	message_t *message, *last_message;
 	url_t *url;
 } axel_t;
@@ -163,6 +171,14 @@ void axel_divide(axel_t *axel);
 
 /* Change how many connections there are, keeping conf and the array in step */
 int axel_conn_resize(axel_t *axel, uint16_t nconns);
+
+/* src/restart.c: keeping the download tied to the remote representation */
+void axel_save_validators(axel_t *axel);
+void axel_set_conn_validators(axel_t *axel);
+void axel_restart_scratch(axel_t *axel);
+
+/* Reap a connection's setup thread, if it has one left to reap */
+void join_setup_thread(conn_t *conn);
 
 double axel_gettime(void);
 ssize_t axel_rand64(uint64_t *);
